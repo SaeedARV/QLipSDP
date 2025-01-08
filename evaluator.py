@@ -68,15 +68,6 @@ class FairnessEvaluator:
         # Compute Lipschitz constant
         lipschitz_constant, lip_time = self._compute_lipschitz_constant(params)
 
-        # Compute fairness (e.g., demographic parity)
-        unique_groups = np.unique(sensitive_attribute)
-        group_means = [
-            np.mean(
-                [round(float(self.circuit_function(params, x))) for x, group in zip(test_data, sensitive_attribute) if group == g]
-            )
-            for g in unique_groups
-        ]
-
         return {
             "accuracy": accuracy,
             "lipschitz_constant": lipschitz_constant,
