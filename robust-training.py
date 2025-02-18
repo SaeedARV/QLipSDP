@@ -70,13 +70,14 @@ class HybridQuantumModel(nn.Module):
             nn.Linear(num_qubits, 2**num_qubits),
             nn.ReLU(),
             nn.Linear(2**num_qubits, num_labels),
-            nn.Softmax(dim=1),  # Outputs a probability vector of length num_labels
+            nn.Softmax(dim=1),
         )
 
     def forward(self, x):
         encoded_input = self.encoding_net(x)
         quantum_output = self.quantum_layer(encoded_input)
         output = self.classical_output_net(quantum_output)
+        # output = self.classical_output_net(encoded_input)
         return output
 
 
@@ -108,7 +109,8 @@ class RobustQuantumTrainer:
                 reg_loss = 0
                 for param in self.model.parameters():
                     reg_loss += torch.sum(param**2)
-                loss += self.lambda_reg  # * reg_loss
+                loss += self.lambda_reg * reg_loss
+                # loss += self.lambda_reg  # Training without regularization
 
                 loss.backward()
                 self.optimizer.step()
@@ -138,7 +140,8 @@ def evaluate(model, X, y):
     with torch.no_grad():
         output = model(X)
         _, predicted = torch.max(output, 1)
-        accuracy = (predicted == y).float().mean()
+        _, y_label = torch.max(output, 1)
+        accuracy = (predicted == y_label).float().mean()
         print(f"Accuracy: {accuracy.item() * 100:.2f}%")
 
 
@@ -165,4 +168,4 @@ if __name__ == "__main__":
     trainer = RobustQuantumTrainer(model, learning_rate=0.01, lambda_reg=0.1)
     trainer.train(X_train, y_train, epochs=15, batch_size=16)
 
-    evaluate(model, X, y)
+    evaluate(model, X_test, y_test)
