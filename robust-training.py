@@ -2,11 +2,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 
 from qiskit import QuantumCircuit, transpile
-from qiskit_aer import AerSimulator, Aer
-
+from qiskit_aer import AerSimulator
+from qiskit_aer.primitives import EstimatorV2
+from qiskit.circuit import ParameterVector
+from qiskit.quantum_info import SparsePauliOp
+from qiskit_machine_learning.neural_networks import EstimatorQNN
+from qiskit_machine_learning.connectors import TorchConnector
 
 from sklearn import datasets as sklearn_datasets
 from sklearn.model_selection import train_test_split
@@ -14,7 +17,22 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 
 
-# Hybrid Quantum-Classical Model
+def create_quantum_circuit(num_qubits):
+    qc = QuantumCircuit(num_qubits)
+    input_params = ParameterVector("x", num_qubits)
+    weight_params = ParameterVector("θ", num_qubits)
+
+    # Data encoding: apply RX rotations using the classical input features.
+    for i in range(num_qubits):
+        qc.rx(input_params[i], i)
+
+    # Variational layer: apply RY rotations with trainable parameters.
+    for i in range(num_qubits):
+        qc.ry(weight_params[i], i)
+
+    return qc, list(input_params), list(weight_params)
+
+
 class HybridQuantumModel(nn.Module):
     def __init__(self, num_qubits, num_features, num_labels, encoding_size=2):
         super(HybridQuantumModel, self).__init__()
@@ -27,42 +45,36 @@ class HybridQuantumModel(nn.Module):
             nn.ReLU(),
         )
 
-        # Quantum Circuit
-        self.num_qubits = num_qubits
-        self.quantum_circuit = QuantumCircuit(num_qubits)
+        # Create the parameterized quantum circuit.
+        qc, input_params, weight_params = create_quantum_circuit(num_qubits)
+        observable = SparsePauliOp.from_list([("Z" + "I" * (num_qubits - 1), 1)])
+        estimator = EstimatorV2(options={"run_options": {"method": "statevector"}})
+        qnn = EstimatorQNN(
+            circuit=qc,
+            input_params=input_params,
+            weight_params=weight_params,
+            # observable=observable,
+            estimator=estimator,
+        )
+        # Wrap the QNN as a PyTorch layer.
+        self.quantum_layer = TorchConnector(qnn)
 
-        # Classical net after quantum model
+        # Classical Neural Network after the quantum network.
         self.classical_output_net = nn.Sequential(
-            nn.Linear(2**num_qubits, num_qubits),
+            nn.Linear(1, num_labels),
             nn.ReLU(),
-            nn.Linear(num_qubits, num_labels),
-            nn.Sigmoid(),
+            nn.Linear(num_labels, 2 * num_labels),
+            nn.ReLU(),
+            nn.Linear(2 * num_labels, num_labels),
+            nn.ReLU(),
             nn.Linear(num_labels, 1),
         )
-        # Classical layer after quantum model
-        # self.classical_output_layer = nn.Linear(2**num_qubits, 1)
 
     def forward(self, x):
         encoded_input = self.encoding_net(x)
-        for qubit in range(self.num_qubits):
-            self.quantum_circuit.rx(encoded_input[0][0].item(), qubit)
-
-        # ---------------------------------------------------------------------------
-        # Simulate the quantum circuit using Aer simulator
-        self.quantum_circuit.save_statevector()
-        aer_simulator = AerSimulator(method="statevector")
-        compiled_circuit = transpile(self.quantum_circuit, aer_simulator)
-        result = aer_simulator.run(compiled_circuit).result()
-        # statevector = result.get_statevector(compiled_circuit)
-        statevector = result.data(0)["statevector"]
-        # counts = result.get_counts(compiled_circuit)
-        # print(statevector)
-        # ---------------------------------------------------------------------------
-
-        # Classical part to process quantum statevector
-        counts_tensor = torch.tensor(statevector, dtype=torch.float)
-        output = self.classical_output_net(counts_tensor)
-
+        quantum_output = self.quantum_layer(encoded_input)
+        quantum_output = quantum_output.view(-1, 1)
+        output = self.classical_output_net(quantum_output)
         return output
 
 
@@ -72,7 +84,7 @@ class RobustQuantumTrainer:
         self.lambda_reg = lambda_reg
         self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
         self.criterion = nn.MSELoss()
-        # criterion = nn.BCELoss()  # Binary Cross Entropy Loss for multilabel classification
+        # criterion = nn.BCELoss()
 
     def train(self, X_train, y_train, epochs=100, batch_size=16):
         # Convert dataset to torch tensors & Create DataLoader
@@ -90,7 +102,7 @@ class RobustQuantumTrainer:
 
                 output = self.model(data)
                 loss = self.criterion(output, target)
-                # Regularization term based on the Lipschitz bound
+                # Regularization term based on the Lipschitz **bound**
                 reg_loss = 0
                 for param in self.model.parameters():
                     reg_loss += torch.sum(param**2)
@@ -114,6 +126,11 @@ def prepare_data(X, y):
 
 
 def evaluate(model, X, y):
+    if not isinstance(X, torch.Tensor):
+        X = torch.tensor(X, dtype=torch.float32)
+    if not isinstance(y, torch.Tensor):
+        y = torch.tensor(y, dtype=torch.long)
+
     with torch.no_grad():
         output = model(X)
         _, predicted = torch.max(output, 1)
@@ -143,6 +160,6 @@ if __name__ == "__main__":
 
     # Train and evaluate the model
     trainer = RobustQuantumTrainer(model, learning_rate=0.01, lambda_reg=0.1)
-    trainer.train(X_train, y_train, epochs=100, batch_size=16)
+    trainer.train(X_train, y_train, epochs=100, batch_size=8)
 
     evaluate(model, X, y)
