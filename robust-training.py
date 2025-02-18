@@ -103,14 +103,16 @@ class RobustQuantumTrainer:
                 self.optimizer.zero_grad()
 
                 output = self.model(data)
-                # print(output, target)
                 loss = self.criterion(output, target)
+
+                # -----------------------------------------------------------
                 # Regularization term based on the Lipschitz **bound**
                 reg_loss = 0
                 for param in self.model.parameters():
                     reg_loss += torch.sum(param**2)
                 loss += self.lambda_reg * reg_loss
                 # loss += self.lambda_reg  # Training without regularization
+                # -----------------------------------------------------------
 
                 loss.backward()
                 self.optimizer.step()
