@@ -37,23 +37,29 @@ class HybridQuantumModel(nn.Module):
     def __init__(self, num_qubits, num_features, num_labels, encoding_size=2):
         super(HybridQuantumModel, self).__init__()
 
-        # Classical Neural Network Encoding
+        # Classical Neural Network Encoding: map raw features to a vector of length num_qubits.
         self.encoding_net = nn.Sequential(
-            nn.Linear(num_features, encoding_size),
+            nn.Linear(num_features, num_qubits),
             nn.ReLU(),
-            nn.Linear(encoding_size, encoding_size),
+            nn.Linear(num_qubits, num_qubits),
             nn.ReLU(),
         )
 
-        # Create the parameterized quantum circuit.
         qc, input_params, weight_params = create_quantum_circuit(num_qubits)
-        observable = SparsePauliOp.from_list([("Z" + "I" * (num_qubits - 1), 1)])
+        # Build a list of #num_qubits observables.
+        observables = []
+        for i in range(num_qubits):
+            op_str = "I" * i + "Z" + "I" * (num_qubits - i - 1)
+            observables.append(SparsePauliOp.from_list([(op_str, 1)]))
+        # Create an EstimatorV2 for statevector simulation.
         estimator = EstimatorV2(options={"run_options": {"method": "statevector"}})
+
+        # Create the quantum neural network using EstimatorQNN.
         qnn = EstimatorQNN(
             circuit=qc,
             input_params=input_params,
             weight_params=weight_params,
-            # observable=observable,
+            observables=observables,
             estimator=estimator,
         )
         # Wrap the QNN as a PyTorch layer.
@@ -61,19 +67,15 @@ class HybridQuantumModel(nn.Module):
 
         # Classical Neural Network after the quantum network.
         self.classical_output_net = nn.Sequential(
-            nn.Linear(1, num_labels),
+            nn.Linear(num_qubits, 2**num_qubits),
             nn.ReLU(),
-            nn.Linear(num_labels, 2 * num_labels),
-            nn.ReLU(),
-            nn.Linear(2 * num_labels, num_labels),
-            nn.ReLU(),
-            nn.Linear(num_labels, 1),
+            nn.Linear(2**num_qubits, num_labels),
+            nn.Softmax(dim=1),  # Outputs a probability vector of length num_labels
         )
 
     def forward(self, x):
         encoded_input = self.encoding_net(x)
         quantum_output = self.quantum_layer(encoded_input)
-        quantum_output = quantum_output.view(-1, 1)
         output = self.classical_output_net(quantum_output)
         return output
 
@@ -87,9 +89,8 @@ class RobustQuantumTrainer:
         # criterion = nn.BCELoss()
 
     def train(self, X_train, y_train, epochs=100, batch_size=16):
-        # Convert dataset to torch tensors & Create DataLoader
         X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-        y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1, 3)
         train_loader = DataLoader(
             torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor),
             batch_size=batch_size,
@@ -101,12 +102,13 @@ class RobustQuantumTrainer:
                 self.optimizer.zero_grad()
 
                 output = self.model(data)
+                # print(output, target)
                 loss = self.criterion(output, target)
                 # Regularization term based on the Lipschitz **bound**
                 reg_loss = 0
                 for param in self.model.parameters():
                     reg_loss += torch.sum(param**2)
-                loss += self.lambda_reg * reg_loss
+                loss += self.lambda_reg  # * reg_loss
 
                 loss.backward()
                 self.optimizer.step()
@@ -116,13 +118,15 @@ class RobustQuantumTrainer:
 
 # Data Preparation
 def prepare_data(X, y):
+    num_classes = max(y) - min(y) + 1
+    y = np.eye(num_classes)[y]
     scaler = StandardScaler()
     X = scaler.fit_transform(X)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
-    return X_train, X_test, y_train, y_test
+    return X_train, X_test, y_train, y_test, num_classes
 
 
 def evaluate(model, X, y):
@@ -140,15 +144,14 @@ def evaluate(model, X, y):
 
 if __name__ == "__main__":
     # Hyperparameters
-    num_qubits = 2
+    num_qubits = 5
 
     # Prepare data
     iris = sklearn_datasets.load_iris()
     X = iris.data
     y = iris.target
-    num_labels = max(y)
     num_features = len(X[0])
-    X_train, X_test, y_train, y_test = prepare_data(X, y)
+    X_train, X_test, y_train, y_test, num_labels = prepare_data(X, y)
 
     # Initialize model
     model = HybridQuantumModel(
@@ -160,6 +163,6 @@ if __name__ == "__main__":
 
     # Train and evaluate the model
     trainer = RobustQuantumTrainer(model, learning_rate=0.01, lambda_reg=0.1)
-    trainer.train(X_train, y_train, epochs=100, batch_size=8)
+    trainer.train(X_train, y_train, epochs=15, batch_size=16)
 
     evaluate(model, X, y)
