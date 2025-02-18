@@ -39,9 +39,9 @@ class HybridQuantumModel(nn.Module):
 
         # Classical Neural Network Encoding: map raw features to a vector of length num_qubits.
         self.encoding_net = nn.Sequential(
-            nn.Linear(num_features, num_qubits),
+            nn.Linear(num_features, 3 * num_qubits),
             nn.ReLU(),
-            nn.Linear(num_qubits, num_qubits),
+            nn.Linear(3 * num_qubits, num_qubits),
             nn.ReLU(),
         )
 
@@ -110,8 +110,7 @@ class RobustQuantumTrainer:
                 reg_loss = 0
                 for param in self.model.parameters():
                     reg_loss += torch.sum(param**2)
-                loss += self.lambda_reg * reg_loss
-                # loss += self.lambda_reg  # Training without regularization
+                # loss += self.lambda_reg * reg_loss
                 # -----------------------------------------------------------
 
                 loss.backward()
@@ -142,7 +141,7 @@ def evaluate(model, X, y):
     with torch.no_grad():
         output = model(X)
         _, predicted = torch.max(output, 1)
-        _, y_label = torch.max(output, 1)
+        _, y_label = torch.max(y, 1)
         accuracy = (predicted == y_label).float().mean()
         print(f"Accuracy: {accuracy.item() * 100:.2f}%")
 
@@ -167,7 +166,10 @@ if __name__ == "__main__":
     )
 
     # Train and evaluate the model
-    trainer = RobustQuantumTrainer(model, learning_rate=0.01, lambda_reg=0.1)
-    trainer.train(X_train, y_train, epochs=15, batch_size=16)
+    trainer = RobustQuantumTrainer(
+        model, learning_rate=0.01, lambda_reg=0.1
+    )  # lambda_reg := lipsdp
+
+    trainer.train(X_train, y_train, epochs=10, batch_size=16)
 
     evaluate(model, X_test, y_test)
