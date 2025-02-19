@@ -34,14 +34,14 @@ def create_quantum_circuit(num_qubits):
 
 
 class HybridQuantumModel(nn.Module):
-    def __init__(self, num_qubits, num_features, num_labels, encoding_size=2):
+    def __init__(self, num_qubits, num_features, num_labels):
         super(HybridQuantumModel, self).__init__()
 
         # Classical Neural Network Encoding: map raw features to a vector of length num_qubits.
         self.encoding_net = nn.Sequential(
-            nn.Linear(num_features, 3 * num_qubits),
-            nn.ReLU(),
-            nn.Linear(3 * num_qubits, num_qubits),
+            nn.Linear(num_features, num_qubits),
+            # nn.ReLU(),
+            # nn.Linear(2 * num_qubits, num_qubits),
             nn.ReLU(),
         )
 
@@ -67,9 +67,9 @@ class HybridQuantumModel(nn.Module):
 
         # Classical Neural Network after the quantum network.
         self.classical_output_net = nn.Sequential(
-            nn.Linear(num_qubits, 2**num_qubits),
-            nn.ReLU(),
-            nn.Linear(2**num_qubits, num_labels),
+            nn.Linear(num_qubits, num_labels),
+            # nn.ReLU(),
+            # nn.Linear(num_qubits, num_labels),
             nn.Softmax(dim=1),
         )
 
@@ -109,8 +109,15 @@ class RobustQuantumTrainer:
                 # Regularization term based on the Lipschitz **bound**
                 reg_loss = 0
                 for param in self.model.parameters():
+                    # for param in self.model.encoding_net.parameters():
                     reg_loss += torch.sum(param**2)
-                # loss += self.lambda_reg * reg_loss
+                print(
+                    "True Loss: ",
+                    loss.item(),
+                    ",\t Regularization Penalty: ",
+                    self.lambda_reg * reg_loss.item(),
+                )
+                loss += self.lambda_reg * reg_loss
                 # -----------------------------------------------------------
 
                 loss.backward()
@@ -148,7 +155,11 @@ def evaluate(model, X, y):
 
 if __name__ == "__main__":
     # Hyperparameters
-    num_qubits = 5
+    num_qubits = 4
+    learning_rate = 0.1
+    lambda_reg = 0.001
+    epochs = 15
+    batch_size = 16
 
     # Prepare data
     iris = sklearn_datasets.load_iris()
@@ -162,14 +173,14 @@ if __name__ == "__main__":
         num_qubits=num_qubits,
         num_features=num_features,
         num_labels=num_labels,
-        encoding_size=2,
     )
 
     # Train and evaluate the model
     trainer = RobustQuantumTrainer(
-        model, learning_rate=0.01, lambda_reg=0.1
+        model, learning_rate=learning_rate, lambda_reg=lambda_reg
     )  # lambda_reg := lipsdp
 
-    trainer.train(X_train, y_train, epochs=10, batch_size=16)
-
+    trainer.train(X_train, y_train, epochs=epochs, batch_size=batch_size)
+    print("Learning Rate:", learning_rate, ",\t Regularization Constant:", lambda_reg)
+    print("#Epochs:", epochs, ",\t |Batch|:", batch_size)
     evaluate(model, X_test, y_test)
