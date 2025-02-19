@@ -85,7 +85,9 @@ class RobustQuantumTrainer:
     def __init__(self, model, learning_rate=0.01, lambda_reg=0.1):
         self.model = model
         self.lambda_reg = lambda_reg
-        self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(
+            model.parameters(), lr=learning_rate, weight_decay=lambda_reg, amsgrad=True
+        )
         self.criterion = nn.MSELoss()
         # criterion = nn.BCELoss()
 
@@ -117,7 +119,7 @@ class RobustQuantumTrainer:
                     ",\t Regularization Penalty: ",
                     self.lambda_reg * reg_loss.item(),
                 )
-                loss += self.lambda_reg * reg_loss
+                # loss += self.lambda_reg * reg_loss
                 # -----------------------------------------------------------
 
                 loss.backward()
@@ -156,8 +158,8 @@ def evaluate(model, X, y):
 if __name__ == "__main__":
     # Hyperparameters
     num_qubits = 4
-    learning_rate = 0.1
-    lambda_reg = 0.001
+    learning_rate = 0.01
+    lambda_reg = 0.01
     epochs = 15
     batch_size = 16
 
