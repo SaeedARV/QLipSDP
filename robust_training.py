@@ -131,6 +131,7 @@ class RobustQuantumTrainer:
 # Data Preparation
 def prepare_data(X, y):
     num_classes = max(y) - min(y) + 1
+    num_features = len(X[0])
     y = np.eye(num_classes)[y]
     scaler = StandardScaler()
     X = scaler.fit_transform(X)
@@ -138,7 +139,7 @@ def prepare_data(X, y):
         X, y, test_size=0.2, random_state=42
     )
 
-    return X_train, X_test, y_train, y_test, num_classes
+    return X_train, X_test, num_features, y_train, y_test, num_classes
 
 
 def evaluate(model, X, y):
@@ -155,21 +156,20 @@ def evaluate(model, X, y):
         print(f"Accuracy: {accuracy.item() * 100:.2f}%")
 
 
-if __name__ == "__main__":
+def hybrid_model(
     # Hyperparameters
-    num_qubits = 4
-    learning_rate = 0.01
-    lambda_reg = 0.01
-    epochs = 15
-    batch_size = 16
-
-    # Prepare data
-    iris = sklearn_datasets.load_iris()
-    X = iris.data
-    y = iris.target
-    num_features = len(X[0])
-    X_train, X_test, y_train, y_test, num_labels = prepare_data(X, y)
-
+    X_train,
+    X_test,
+    num_features,
+    y_train,
+    y_test,
+    num_labels,
+    num_qubits=4,
+    learning_rate=0.01,
+    lambda_reg=0.001,
+    epochs=15,
+    batch_size=16,
+):
     # Initialize model
     model = HybridQuantumModel(
         num_qubits=num_qubits,
@@ -186,3 +186,17 @@ if __name__ == "__main__":
     print("Learning Rate:", learning_rate, ",\t Regularization Constant:", lambda_reg)
     print("#Epochs:", epochs, ",\t |Batch|:", batch_size)
     evaluate(model, X_test, y_test)
+    return model
+
+
+def train_iris(iris=sklearn_datasets.load_iris()):
+    # Prepare data
+    X = iris.data
+    y = iris.target
+    X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(X, y)
+
+    return hybrid_model(X_train, X_test, num_features, y_train, y_test, num_labels)
+
+
+if __name__ == "__main__":
+    train_iris()
