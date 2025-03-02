@@ -11,6 +11,7 @@ from qiskit.circuit import ParameterVector
 from qiskit.quantum_info import SparsePauliOp
 from qiskit_machine_learning.neural_networks import EstimatorQNN
 from qiskit_machine_learning.connectors import TorchConnector
+from qiskit.quantum_info import Operator
 
 
 # -------------------------------------------------------------------------
@@ -151,6 +152,7 @@ class HybridModelExtractor:
         i = 0
         while i < len(modules):
             mod = modules[i]
+            i += 1
             # --- Classical layer extraction ---
             if isinstance(mod, nn.Linear):
                 activation = "linear"
@@ -178,50 +180,70 @@ class HybridModelExtractor:
 
             # --- Quantum layer extraction ---
             # We assume quantum layers are wrapped in a TorchConnector.
-            elif hasattr(mod, "quantum_layer"):
-                q_layer_module = mod.quantum_layer
+            elif isinstance(mod, TorchConnector):
                 try:
-                    qnn = q_layer_module.qnn
-                    # Get observables as measurement operators.
-                    measurement_ops = []
-                    for obs in qnn.observables:
-                        # We assume each observable is given as a SparsePauliOp.
-                        # Convert to a dense numpy matrix.
-                        measurement_ops.append(obs.to_matrix())
-                    # Extract quantum weights (trainable parameters).
-                    # weight_params is a list of Parameter objects; we extract current numeric values.
-                    q_weights = None
-                    if hasattr(qnn, "weight_params"):
-                        # The TorchConnector's QNN may store weights in a tensor.
-                        q_weights = q_layer_module._model.state_dict().get(
-                            "qnn.weight", None
+                    # Retrieve the trainable parameters from the TorchConnector.
+                    params = {}
+                    for name, param in mod.named_parameters():
+                        params[name] = param.detach().cpu().numpy()
+                    if "weight" not in params:
+                        raise ValueError(
+                            "No 'weight' parameter found in TorchConnector"
                         )
-                        if q_weights is not None:
-                            q_weights = q_weights.cpu().numpy()
-                    enc = getattr(qnn, "encoding", "amplitude")
-                    num_qubits = getattr(qnn, "num_qubits", None)
+                    trained_values = params["weight"]
+
+                    # Get the underlying quantum circuit.
+                    qc = mod.neural_network.circuit
+
+                    # For a fully bound circuit, assign numerical values to both input and weight parameters.
+                    # Here, we set input parameters to zeros.
+                    input_values = [0.0] * len(self.model.input_params)
+                    param_dict = {
+                        p: v for p, v in zip(self.model.input_params, input_values)
+                    }
+                    param_dict.update(
+                        {p: v for p, v in zip(self.model.weight_params, trained_values)}
+                    )
+                    bound_circuit = qc.assign_parameters(param_dict)
+
+                    # Compute the unitary matrix of the bound circuit.
+                    unitary_matrix = Operator(bound_circuit).data
+
+                    # Extract measurement operators from the QNN observables.
+                    measurement_ops = [
+                        obs.to_matrix() for obs in mod.neural_network.observables
+                    ]
+
+                    # Get the encoding; default to "amplitude" if not provided.
+                    enc = getattr(mod.neural_network, "encoding", "amplitude")
+                    num_qubits = qc.num_qubits
+
+                    # Create a QuantumLayer instance.
                     qlayer = QuantumLayer(
                         measurement_ops=measurement_ops,
                         encoding=enc,
                         num_qubits=num_qubits,
                         channel=None,
-                        q_weights=q_weights,
+                        q_weights=trained_values,
                     )
+                    # Optionally, store the computed unitary in the quantum layer.
+                    qlayer.unitary_matrix = unitary_matrix
+
                     layers.append(qlayer)
                 except Exception as e:
                     print("Warning: could not extract quantum layer parameters:", e)
+
             elif isinstance(mod, nn.Sequential):
                 sub_extractor = HybridModelExtractor(mod)
                 layers.extend(sub_extractor.extract())
-            i += 1
         return layers
 
 
 # Tests
 if __name__ == "__main__":
-    from robust_training import train_iris as trained_model
+    from robust_training import iris_hybrid_model as model
 
-    extractor = HybridModelExtractor(trained_model())
+    extractor = HybridModelExtractor(model())
     extracted_layers = extractor.extract()
     print("Extracted", len(extracted_layers), "layers from the model.")
     for idx, layer in enumerate(extracted_layers):

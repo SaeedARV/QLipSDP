@@ -10,6 +10,9 @@ from qiskit.circuit import ParameterVector
 from qiskit.quantum_info import SparsePauliOp
 from qiskit_machine_learning.neural_networks import EstimatorQNN
 from qiskit_machine_learning.connectors import TorchConnector
+from qiskit.visualization import circuit_drawer
+from qiskit.quantum_info import Operator
+
 
 from sklearn import datasets as sklearn_datasets
 from sklearn.model_selection import train_test_split
@@ -45,7 +48,9 @@ class HybridQuantumModel(nn.Module):
             nn.ReLU(),
         )
 
-        qc, input_params, weight_params = create_quantum_circuit(num_qubits)
+        self.qc, self.input_params, self.weight_params = create_quantum_circuit(
+            num_qubits
+        )
         # Build a list of #num_qubits observables.
         observables = []
         for i in range(num_qubits):
@@ -56,9 +61,9 @@ class HybridQuantumModel(nn.Module):
 
         # Create the quantum neural network using EstimatorQNN.
         qnn = EstimatorQNN(
-            circuit=qc,
-            input_params=input_params,
-            weight_params=weight_params,
+            circuit=self.qc,
+            input_params=self.input_params,
+            weight_params=self.weight_params,
             observables=observables,
             estimator=estimator,
         )
@@ -136,7 +141,7 @@ def prepare_data(X, y):
     scaler = StandardScaler()
     X = scaler.fit_transform(X)
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=0.1, random_state=42
     )
 
     return X_train, X_test, num_features, y_train, y_test, num_classes
@@ -194,9 +199,65 @@ def train_iris(iris=sklearn_datasets.load_iris()):
     X = iris.data
     y = iris.target
     X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(X, y)
+    model = hybrid_model(X_train, X_test, num_features, y_train, y_test, num_labels)
+    torch.save(model.state_dict(), "./model/iris.pt")
+    return model
 
-    return hybrid_model(X_train, X_test, num_features, y_train, y_test, num_labels)
+
+def iris_hybrid_model(num_qubits=4, iris=sklearn_datasets.load_iris()):
+    X = iris.data
+    y = iris.target
+    X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(X, y)
+    model = HybridQuantumModel(
+        num_qubits=num_qubits,
+        num_features=num_features,
+        num_labels=num_labels,
+    )
+    model.load_state_dict(torch.load("./model/iris.pt", weights_only=True))
+    model.eval()
+    return model
 
 
 if __name__ == "__main__":
-    train_iris()
+    # model = train_iris()
+    model = iris_hybrid_model()
+    # print(model)
+    layers = []
+    if hasattr(model, "layer_list"):
+        modules = model.layer_list
+    elif isinstance(model, nn.Sequential):
+        modules = list(model)
+    else:
+        modules = list(model.children())
+
+    i = 0
+    while i < len(modules):
+        mod = modules[i]
+        i += 1
+        if isinstance(mod, TorchConnector):
+            params = {}
+            for name, param in mod.named_parameters():
+                params[name] = param.detach().cpu().numpy()
+            qc = mod.neural_network.circuit
+            trained_values = params["weight"]
+            input_values = [0.0] * len(model.input_params)
+
+            # Create a dictionary mapping each parameter to its value.
+            param_dict = {p: v for p, v in zip(model.input_params, input_values)}
+            param_dict.update(
+                {p: v for p, v in zip(model.weight_params, trained_values)}
+            )
+            bound_circuit = qc.assign_parameters(param_dict)
+            unitary_matrix = Operator(bound_circuit).data
+            # print(unitary_matrix)
+            print(
+                mod,
+                "\n",
+                type(mod),
+                "\n",
+                mod.named_parameters(),
+                "\n",
+                unitary_matrix,
+                "\n-----------",
+            )
+            print(params)
