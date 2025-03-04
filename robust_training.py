@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt 
 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
@@ -19,6 +20,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+seed = 23423
+set_seed(seed)
 
 def create_quantum_circuit(num_qubits):
     qc = QuantumCircuit(num_qubits)
@@ -34,7 +43,6 @@ def create_quantum_circuit(num_qubits):
         qc.ry(weight_params[i], i)
 
     return qc, list(input_params), list(weight_params)
-
 
 class HybridQuantumModel(nn.Module):
     def __init__(self, num_qubits, num_features, num_labels):
@@ -87,14 +95,22 @@ class HybridQuantumModel(nn.Module):
 
 
 class RobustQuantumTrainer:
-    def __init__(self, model, learning_rate=0.01, lambda_reg=0.1):
+    def __init__(self, model, learning_rate=0.01, lambda_reg=0.1, loss_metric="l2"):
         self.model = model
         self.lambda_reg = lambda_reg
         self.optimizer = optim.Adam(
             model.parameters(), lr=learning_rate, weight_decay=lambda_reg, amsgrad=True
         )
-        self.criterion = nn.MSELoss()
-        # criterion = nn.BCELoss()
+
+        # Define the loss function based on the metric
+        if loss_metric == "l1":
+            self.criterion = nn.L1Loss()
+        elif loss_metric == "l2":
+            self.criterion = nn.MSELoss()
+        elif loss_metric == "linf":
+            self.criterion = lambda y_pred, y_true: torch.max(torch.abs(y_pred - y_true))
+        else:
+            raise ValueError("Invalid loss metric. Choose 'l1', 'l2', or 'linf'.")
 
     def train(self, X_train, y_train, epochs=100, batch_size=16):
         X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
@@ -104,6 +120,9 @@ class RobustQuantumTrainer:
             batch_size=batch_size,
             shuffle=True,
         )
+
+        # Track loss values
+        lipschitz_values = []
 
         for epoch in range(epochs):
             for batch_idx, (data, target) in enumerate(train_loader):
@@ -130,8 +149,34 @@ class RobustQuantumTrainer:
                 loss.backward()
                 self.optimizer.step()
 
+
+            from QlipSDP import HybridModelExtractor, compute_network_lipschitz
+            # Compute Lipschitz constant for the current model state
+            extractor = HybridModelExtractor(self.model)
+            extracted_layers = extractor.extract()
+            overall_K = compute_network_lipschitz(extracted_layers)
+            lipschitz_values.append(overall_K)
+
             print(f"Epoch {epoch + 1}/{epochs}, Loss: {loss.item()}")
 
+        return lipschitz_values
+
+# Plotting function
+def plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_epochs):
+    epochs = range(1, num_epochs + 1)
+    plt.figure(figsize=(10, 6))
+
+    # Plot Lipschitz values for all three models
+    plt.plot(epochs, lipschitz_values_l1, label="ℓ1 Loss", marker="o")
+    plt.plot(epochs, lipschitz_values_l2, label="ℓ2 Loss", marker="x")
+    plt.plot(epochs, lipschitz_values_linf, label="ℓ∞ Loss", marker="s")
+
+    plt.xlabel("Training Epochs")
+    plt.ylabel("Lipschitz Constant")
+    plt.title(f"Lipschitz Constant Over Training Epochs for Different Loss Metrics with seed {seed}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
 # Data Preparation
 def prepare_data(X, y):
@@ -174,6 +219,7 @@ def hybrid_model(
     lambda_reg=0.001,
     epochs=15,
     batch_size=16,
+    loss_metric="l2",
 ):
     # Initialize model
     model = HybridQuantumModel(
@@ -184,14 +230,15 @@ def hybrid_model(
 
     # Train and evaluate the model
     trainer = RobustQuantumTrainer(
-        model, learning_rate=learning_rate, lambda_reg=lambda_reg
+        model, learning_rate=learning_rate, lambda_reg=lambda_reg, loss_metric=loss_metric
     )  # lambda_reg := lipsdp
 
-    trainer.train(X_train, y_train, epochs=epochs, batch_size=batch_size)
+    lipschitz_values = trainer.train(X_train, y_train, epochs=epochs, batch_size=batch_size)
+    
     print("Learning Rate:", learning_rate, ",\t Regularization Constant:", lambda_reg)
     print("#Epochs:", epochs, ",\t |Batch|:", batch_size)
     evaluate(model, X_test, y_test)
-    return model
+    return model, lipschitz_values
 
 
 def train_iris(iris=sklearn_datasets.load_iris()):
@@ -199,7 +246,22 @@ def train_iris(iris=sklearn_datasets.load_iris()):
     X = iris.data
     y = iris.target
     X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(X, y)
-    model = hybrid_model(X_train, X_test, num_features, y_train, y_test, num_labels)
+    num_epochs = 30
+
+    # Train three models with different loss metrics
+    model_, lipschitz_values_l1 = hybrid_model(
+        X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric="l1", epochs=num_epochs
+    )
+    model, lipschitz_values_l2 = hybrid_model(
+        X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric="l2", epochs=num_epochs
+    )
+    model_, lipschitz_values_linf = hybrid_model(
+        X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric="linf", epochs=num_epochs
+    )
+
+    # Plot the Lipschitz values for all three models
+    plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_epochs=num_epochs)
+
     torch.save(model.state_dict(), "./model/iris.pt")
     return model
 
@@ -219,8 +281,8 @@ def iris_hybrid_model(num_qubits=4, iris=sklearn_datasets.load_iris()):
 
 
 if __name__ == "__main__":
-    # model = train_iris()
-    model = iris_hybrid_model()
+    model = train_iris()
+    # model, loss_values = iris_hybrid_model()
     # print(model)
     layers = []
     if hasattr(model, "layer_list"):
