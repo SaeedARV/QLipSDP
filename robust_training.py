@@ -242,7 +242,7 @@ def train_with_regularization(X_train, X_test, y_train, y_test, num_features, nu
     plot_lipschitz_vs_regularization(lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], lambda_reg_values)
 
 def train_with_varying_qubits(X_train, X_test, y_train, y_test, num_features, num_labels):
-    num_qubits_list = range(1, 11)  # Number of qubits from 2 to 20 in steps of 2
+    num_qubits_list = range(1, 7)  # Number of qubits from 2 to 20 in steps of 2
     metrics = ["l1", "l2", "linf"]
     lipschitz_values = {metric: [] for metric in metrics}
 
@@ -261,7 +261,7 @@ def train_with_varying_qubits(X_train, X_test, y_train, y_test, num_features, nu
     )
 
 def train_with_varying_width(X_train, X_test, y_train, y_test, num_features, num_labels):
-    widths = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    widths = range(5, 56, 5)
     metrics = ["l1", "l2", "linf"]
     lipschitz_values = {metric: [] for metric in metrics}
 
