@@ -228,7 +228,7 @@ def train_with_regularization(X_train, X_test, y_train, y_test, num_features, nu
         print(f"Training with λ = {lambda_reg}")
         for metric in lipschitz_values.keys():
             model, l_values = train_and_save_model(
-            X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric=metric
+            X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric=metric, lambda_reg=lambda_reg
             )
             lipschitz_values[metric].append(l_values[-1])
     plot_lipschitz_vs_regularization(lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], lambda_reg_values)
@@ -245,7 +245,7 @@ def plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_va
 
     plt.xlabel("Training Epochs")
     plt.ylabel("Lipschitz Constant")
-    plt.title(f"Lipschitz Constant Over Training Epochs for Different Loss Metrics with seed {seed}")
+    plt.title(f"Lipschitz Constant Over Training Epochs for Different Loss Metrics")
     plt.legend()
     plt.grid(True)
     plt.show()
@@ -260,7 +260,7 @@ def plot_lipschitz_vs_regularization(lipschitz_values_l1, lipschitz_values_l2, l
 
     plt.xlabel("Regularization Parameter (λ)")
     plt.ylabel("Lipschitz Constant")
-    plt.title(f"Lipschitz Constant vs. Regularization Parameter for Different Loss Metrics with seed {seed}")
+    plt.title(f"Lipschitz Constant vs. Regularization Parameter for Different Loss Metrics")
     plt.legend()
     plt.grid(True)
     plt.show()
