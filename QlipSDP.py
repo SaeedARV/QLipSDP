@@ -152,7 +152,7 @@ class HybridModelExtractor:
         i = 0
         while i < len(modules):
             mod = modules[i]
-            i += 1
+
             # --- Classical layer extraction ---
             if isinstance(mod, nn.Linear):
                 activation = "linear"
@@ -162,11 +162,16 @@ class HybridModelExtractor:
                     if isinstance(next_mod, nn.ReLU):
                         activation = "relu"
                         slope_bounds = (0.0, 1.0)
-                        i += 1
                     elif isinstance(next_mod, nn.Tanh):
                         activation = "tanh"
                         slope_bounds = (0.0, 1.0)
-                        i += 1
+                    elif isinstance(next_mod, nn.Linear):
+                        activation = "linear"
+                        slope_bounds = (1.0, 1.0)
+                    else:
+                        activation = "softmax"
+                        slope_bounds = (0.0, 1.0)
+                
                 W = mod.weight.detach().cpu().numpy()
                 b = (
                     mod.bias.detach().cpu().numpy()
@@ -236,10 +241,11 @@ class HybridModelExtractor:
             elif isinstance(mod, nn.Sequential):
                 sub_extractor = HybridModelExtractor(mod)
                 layers.extend(sub_extractor.extract())
+            
+            i += 1
         return layers
 
 
-# Tests
 if __name__ == "__main__":
     from robust_training import iris_hybrid_model as model
 
