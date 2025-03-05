@@ -19,6 +19,7 @@ from sklearn import datasets as sklearn_datasets
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 # Set device to CUDA if available, otherwise CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,11 +50,15 @@ def create_quantum_circuit(num_qubits):
     return qc, list(input_params), list(weight_params)
 
 class HybridQuantumModel(nn.Module):
-    def __init__(self, num_qubits, num_features, num_labels):
+    def __init__(self, num_qubits, num_features, num_labels, width):
         super(HybridQuantumModel, self).__init__()
+        self.num_qubits = num_qubits
+        self.width = width 
+
         # Classical Neural Network Encoding: map raw features to a vector of length num_qubits.
         self.encoding_net = nn.Sequential(
-            nn.Linear(num_features, num_qubits),
+            nn.Linear(num_features, width),
+            nn.Linear(width, num_qubits),
             nn.ReLU(),
         )
 
@@ -118,6 +123,7 @@ class RobustQuantumTrainer:
         lipschitz_values = []
         for epoch in range(epochs):
             for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(device), target.to(device)
                 self.optimizer.zero_grad()
 
                 output = self.model(data)
@@ -181,6 +187,7 @@ def train_and_save_model(
     y_test,
     num_labels,
     num_qubits=4,
+    width = 4,
     learning_rate=0.01,
     lambda_reg=0.001,
     epochs=30,
@@ -193,6 +200,7 @@ def train_and_save_model(
         num_qubits=num_qubits,
         num_features=num_features,
         num_labels=num_labels,
+        width=width
     ).to(device)
 
     # Train and evaluate the model
@@ -207,16 +215,16 @@ def train_and_save_model(
 
     torch.save(model.state_dict(), save_path)
     evaluate(model, X_test, y_test)
-    return model, lipschitz_values
+    return lipschitz_values
 
 
 
 def train_and_compare_models(X_train, X_test, y_train, y_test, num_features, num_labels):
     metrics = ["l1", "l2", "linf"]
     lipschitz_values = {}
-    for metric in metrics:
+    for metric in tqdm(metrics):
         print(f"Training model with {metric} loss...")
-        model, lipschitz_values[metric] = train_and_save_model(
+        lipschitz_values[metric] = train_and_save_model(
             X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric=metric
         )
     plot_lipschitz_values(lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], num_epochs=30)
@@ -224,14 +232,52 @@ def train_and_compare_models(X_train, X_test, y_train, y_test, num_features, num
 def train_with_regularization(X_train, X_test, y_train, y_test, num_features, num_labels):
     lambda_reg_values = np.linspace(0.0001, 0.5, 20)
     lipschitz_values = {"l1": [], "l2": [], "linf": []}
-    for lambda_reg in lambda_reg_values:
+    for lambda_reg in tqdm(lambda_reg_values):
         print(f"Training with λ = {lambda_reg}")
         for metric in lipschitz_values.keys():
-            model, l_values = train_and_save_model(
+            l_values = train_and_save_model(
             X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric=metric, lambda_reg=lambda_reg
             )
             lipschitz_values[metric].append(l_values[-1])
     plot_lipschitz_vs_regularization(lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], lambda_reg_values)
+
+def train_with_varying_qubits(X_train, X_test, y_train, y_test, num_features, num_labels):
+    num_qubits_list = range(1, 11)  # Number of qubits from 2 to 20 in steps of 2
+    metrics = ["l1", "l2", "linf"]
+    lipschitz_values = {metric: [] for metric in metrics}
+
+    for num_qubits in tqdm(num_qubits_list):
+        print(f"Training model with {num_qubits} qubits...")
+        for metric in metrics:
+            l_values = train_and_save_model(
+                X_train, X_test, num_features, y_train, y_test, num_labels,
+                num_qubits=num_qubits, loss_metric=metric
+            )
+            lipschitz_values[metric].append(l_values[-1]) 
+
+    # Plot the results
+    plot_lipschitz_vs_qubits(
+        lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], num_qubits_list
+    )
+
+def train_with_varying_width(X_train, X_test, y_train, y_test, num_features, num_labels):
+    widths = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    metrics = ["l1", "l2", "linf"]
+    lipschitz_values = {metric: [] for metric in metrics}
+
+    for width in tqdm(widths):
+        print(f"Training model with width = {width}...")
+        for metric in metrics:
+            l_values = train_and_save_model(
+                X_train, X_test, num_features, y_train, y_test, num_labels,
+                width=width, loss_metric=metric
+            )
+            lipschitz_values[metric].append(l_values[-1])  # Use the final Lipschitz value
+
+    # Plot the results
+    plot_lipschitz_vs_width(
+        lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], widths
+    )
 
 # Plotting function
 def plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_epochs):
@@ -265,6 +311,30 @@ def plot_lipschitz_vs_regularization(lipschitz_values_l1, lipschitz_values_l2, l
     plt.grid(True)
     plt.show()
 
+def plot_lipschitz_vs_qubits(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_qubits_list):
+    plt.figure(figsize=(10, 6))
+    plt.plot(num_qubits_list, lipschitz_values_l1, label=r"$\ell_1$ Loss", marker="o")
+    plt.plot(num_qubits_list, lipschitz_values_l2, label=r"$\ell_2$ Loss", marker="x")
+    plt.plot(num_qubits_list, lipschitz_values_linf, label=r"$\ell_\infty$ Loss", marker="s")
+    plt.xlabel("Number of Qubits")
+    plt.ylabel("Lipschitz Constant")
+    plt.title("Lipschitz Constant vs. Number of Qubits for Different Loss Metrics")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+def plot_lipschitz_vs_width(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, widths):
+    plt.figure(figsize=(10, 6))
+    plt.plot(widths, lipschitz_values_l1, label=r"$\ell_1$ Loss", marker="o")
+    plt.plot(widths, lipschitz_values_l2, label=r"$\ell_2$ Loss", marker="x")
+    plt.plot(widths, lipschitz_values_linf, label=r"$\ell_\infty$ Loss", marker="s")
+    plt.xlabel("Width of Classical Encoding Network")
+    plt.ylabel("Lipschitz Constant")
+    plt.title("Lipschitz Constant vs. Width of Classical Encoding Network for Different Loss Metrics")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
 if __name__ == "__main__":
     iris = sklearn_datasets.load_iris()
     X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(iris.data, iris.target)
@@ -275,4 +345,10 @@ if __name__ == "__main__":
     # train_and_compare_models(X_train, X_test, y_train, y_test, num_features, num_labels)
 
     # Train with different regularization parameters
-    train_with_regularization(X_train, X_test, y_train, y_test, num_features, num_labels)
+    # train_with_regularization(X_train, X_test, y_train, y_test, num_features, num_labels)
+
+    # Train and plot Lipschitz vs. Number of Qubits for different loss metrics
+    # train_with_varying_qubits(X_train, X_test, y_train, y_test, num_features, num_labels)
+
+    # Train and plot Lipschitz vs. Width of Classical Encoding Network for different loss metrics
+    train_with_varying_width(X_train, X_test, y_train, y_test, num_features, num_labels)
