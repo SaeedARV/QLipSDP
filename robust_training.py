@@ -20,13 +20,17 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 
+# Set device to CUDA if available, otherwise CPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
 def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-seed = 23423
+seed = 1
 set_seed(seed)
 
 def create_quantum_circuit(num_qubits):
@@ -47,24 +51,16 @@ def create_quantum_circuit(num_qubits):
 class HybridQuantumModel(nn.Module):
     def __init__(self, num_qubits, num_features, num_labels):
         super(HybridQuantumModel, self).__init__()
-
         # Classical Neural Network Encoding: map raw features to a vector of length num_qubits.
         self.encoding_net = nn.Sequential(
             nn.Linear(num_features, num_qubits),
-            # nn.ReLU(),
-            # nn.Linear(2 * num_qubits, num_qubits),
             nn.ReLU(),
         )
 
-        self.qc, self.input_params, self.weight_params = create_quantum_circuit(
-            num_qubits
-        )
-        # Build a list of #num_qubits observables.
-        observables = []
-        for i in range(num_qubits):
-            op_str = "I" * i + "Z" + "I" * (num_qubits - i - 1)
-            observables.append(SparsePauliOp.from_list([(op_str, 1)]))
-        # Create an EstimatorV2 for statevector simulation.
+        self.qc, self.input_params, self.weight_params = create_quantum_circuit(num_qubits)
+
+        # Define the observables for the quantum neural network.
+        observables = [SparsePauliOp.from_list([("I" * i + "Z" + "I" * (num_qubits - i - 1), 1)]) for i in range(num_qubits)]
         estimator = EstimatorV2(options={"run_options": {"method": "statevector"}})
 
         # Create the quantum neural network using EstimatorQNN.
@@ -81,8 +77,6 @@ class HybridQuantumModel(nn.Module):
         # Classical Neural Network after the quantum network.
         self.classical_output_net = nn.Sequential(
             nn.Linear(num_qubits, num_labels),
-            # nn.ReLU(),
-            # nn.Linear(num_qubits, num_labels),
             nn.Softmax(dim=1),
         )
 
@@ -90,7 +84,6 @@ class HybridQuantumModel(nn.Module):
         encoded_input = self.encoding_net(x)
         quantum_output = self.quantum_layer(encoded_input)
         output = self.classical_output_net(quantum_output)
-        # output = self.classical_output_net(encoded_input)
         return output
 
 
@@ -101,29 +94,28 @@ class RobustQuantumTrainer:
         self.optimizer = optim.Adam(
             model.parameters(), lr=learning_rate, weight_decay=lambda_reg, amsgrad=True
         )
+        self.criterion = self._get_loss_function(loss_metric)
 
-        # Define the loss function based on the metric
+    def _get_loss_function(self, loss_metric):
         if loss_metric == "l1":
-            self.criterion = nn.L1Loss()
+            return nn.L1Loss()
         elif loss_metric == "l2":
-            self.criterion = nn.MSELoss()
+            return nn.MSELoss()
         elif loss_metric == "linf":
-            self.criterion = lambda y_pred, y_true: torch.max(torch.abs(y_pred - y_true))
+            return lambda y_pred, y_true: torch.max(torch.abs(y_pred - y_true))
         else:
             raise ValueError("Invalid loss metric. Choose 'l1', 'l2', or 'linf'.")
 
     def train(self, X_train, y_train, epochs=100, batch_size=16):
-        X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-        y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1, 3)
+        X_train_tensor = torch.tensor(X_train, dtype=torch.float32).to(device)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1, 3).to(device)
         train_loader = DataLoader(
             torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor),
             batch_size=batch_size,
             shuffle=True,
         )
 
-        # Track loss values
         lipschitz_values = []
-
         for epoch in range(epochs):
             for batch_idx, (data, target) in enumerate(train_loader):
                 self.optimizer.zero_grad()
@@ -131,20 +123,14 @@ class RobustQuantumTrainer:
                 output = self.model(data)
                 loss = self.criterion(output, target)
 
-                # -----------------------------------------------------------
                 # Regularization term based on the Lipschitz **bound**
-                reg_loss = 0
-                for param in self.model.parameters():
-                    # for param in self.model.encoding_net.parameters():
-                    reg_loss += torch.sum(param**2)
+                reg_loss = sum(torch.sum(param**2) for param in self.model.parameters())
                 print(
                     "True Loss: ",
                     loss.item(),
                     ",\t Regularization Penalty: ",
                     self.lambda_reg * reg_loss.item(),
                 )
-                # loss += self.lambda_reg * reg_loss
-                # -----------------------------------------------------------
 
                 loss.backward()
                 self.optimizer.step()
@@ -161,24 +147,6 @@ class RobustQuantumTrainer:
 
         return lipschitz_values
 
-# Plotting function
-def plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_epochs):
-    epochs = range(1, num_epochs + 1)
-    plt.figure(figsize=(10, 6))
-
-    # Plot Lipschitz values for all three models
-    plt.plot(epochs, lipschitz_values_l1, label="ℓ1 Loss", marker="o")
-    plt.plot(epochs, lipschitz_values_l2, label="ℓ2 Loss", marker="x")
-    plt.plot(epochs, lipschitz_values_linf, label="ℓ∞ Loss", marker="s")
-
-    plt.xlabel("Training Epochs")
-    plt.ylabel("Lipschitz Constant")
-    plt.title(f"Lipschitz Constant Over Training Epochs for Different Loss Metrics with seed {seed}")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-# Data Preparation
 def prepare_data(X, y):
     num_classes = max(y) - min(y) + 1
     num_features = len(X[0])
@@ -193,10 +161,8 @@ def prepare_data(X, y):
 
 
 def evaluate(model, X, y):
-    if not isinstance(X, torch.Tensor):
-        X = torch.tensor(X, dtype=torch.float32)
-    if not isinstance(y, torch.Tensor):
-        y = torch.tensor(y, dtype=torch.long)
+    X = torch.tensor(X, dtype=torch.float32).to(device)
+    y = torch.tensor(y, dtype=torch.long).to(device)
 
     with torch.no_grad():
         output = model(X)
@@ -206,7 +172,7 @@ def evaluate(model, X, y):
         print(f"Accuracy: {accuracy.item() * 100:.2f}%")
 
 
-def hybrid_model(
+def train_and_save_model(
     # Hyperparameters
     X_train,
     X_test,
@@ -217,16 +183,17 @@ def hybrid_model(
     num_qubits=4,
     learning_rate=0.01,
     lambda_reg=0.001,
-    epochs=15,
+    epochs=30,
     batch_size=16,
     loss_metric="l2",
+    save_path="./model/model.pt"
 ):
     # Initialize model
     model = HybridQuantumModel(
         num_qubits=num_qubits,
         num_features=num_features,
         num_labels=num_labels,
-    )
+    ).to(device)
 
     # Train and evaluate the model
     trainer = RobustQuantumTrainer(
@@ -237,89 +204,75 @@ def hybrid_model(
     
     print("Learning Rate:", learning_rate, ",\t Regularization Constant:", lambda_reg)
     print("#Epochs:", epochs, ",\t |Batch|:", batch_size)
+
+    torch.save(model.state_dict(), save_path)
     evaluate(model, X_test, y_test)
     return model, lipschitz_values
 
 
-def train_iris(iris=sklearn_datasets.load_iris()):
-    # Prepare data
-    X = iris.data
-    y = iris.target
-    X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(X, y)
-    num_epochs = 30
 
-    # Train three models with different loss metrics
-    model_, lipschitz_values_l1 = hybrid_model(
-        X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric="l1", epochs=num_epochs
-    )
-    model, lipschitz_values_l2 = hybrid_model(
-        X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric="l2", epochs=num_epochs
-    )
-    model_, lipschitz_values_linf = hybrid_model(
-        X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric="linf", epochs=num_epochs
-    )
+def train_and_compare_models(X_train, X_test, y_train, y_test, num_features, num_labels):
+    metrics = ["l1", "l2", "linf"]
+    lipschitz_values = {}
+    for metric in metrics:
+        print(f"Training model with {metric} loss...")
+        model, lipschitz_values[metric] = train_and_save_model(
+            X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric=metric
+        )
+    plot_lipschitz_values(lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], num_epochs=30)
 
-    # Plot the Lipschitz values for all three models
-    plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_epochs=num_epochs)
+def train_with_regularization(X_train, X_test, y_train, y_test, num_features, num_labels):
+    lambda_reg_values = np.linspace(0.0001, 0.5, 20)
+    lipschitz_values = {"l1": [], "l2": [], "linf": []}
+    for lambda_reg in lambda_reg_values:
+        print(f"Training with λ = {lambda_reg}")
+        for metric in lipschitz_values.keys():
+            model, l_values = train_and_save_model(
+            X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric=metric
+            )
+            lipschitz_values[metric].append(l_values[-1])
+    plot_lipschitz_vs_regularization(lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], lambda_reg_values)
 
-    torch.save(model.state_dict(), "./model/iris.pt")
-    return model
+# Plotting function
+def plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_epochs):
+    epochs = range(1, num_epochs + 1)
+    plt.figure(figsize=(10, 6))
 
+    # Plot Lipschitz values for all three models
+    plt.plot(epochs, lipschitz_values_l1, label=r"$\ell_1$ Loss", marker="o")
+    plt.plot(epochs, lipschitz_values_l2, label=r"$\ell_2$ Loss", marker="x")
+    plt.plot(epochs, lipschitz_values_linf, label=r"$\ell_\infty$ Loss", marker="s")
 
-def iris_hybrid_model(num_qubits=4, iris=sklearn_datasets.load_iris()):
-    X = iris.data
-    y = iris.target
-    X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(X, y)
-    model = HybridQuantumModel(
-        num_qubits=num_qubits,
-        num_features=num_features,
-        num_labels=num_labels,
-    )
-    model.load_state_dict(torch.load("./model/iris.pt", weights_only=True))
-    model.eval()
-    return model
+    plt.xlabel("Training Epochs")
+    plt.ylabel("Lipschitz Constant")
+    plt.title(f"Lipschitz Constant Over Training Epochs for Different Loss Metrics with seed {seed}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
+def plot_lipschitz_vs_regularization(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, lambda_reg_values):
+    plt.figure(figsize=(10, 6))
+
+    # Plot Lipschitz values for all three loss metrics
+    plt.plot(lambda_reg_values, lipschitz_values_l1, label=r"$\ell_1$ Loss", marker="o")
+    plt.plot(lambda_reg_values, lipschitz_values_l2, label=r"$\ell_2$ Loss", marker="x")
+    plt.plot(lambda_reg_values, lipschitz_values_linf, label=r"$\ell_\infty$ Loss", marker="s")
+
+    plt.xlabel("Regularization Parameter (λ)")
+    plt.ylabel("Lipschitz Constant")
+    plt.title(f"Lipschitz Constant vs. Regularization Parameter for Different Loss Metrics with seed {seed}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
 if __name__ == "__main__":
-    model = train_iris()
-    # model, loss_values = iris_hybrid_model()
-    # print(model)
-    layers = []
-    if hasattr(model, "layer_list"):
-        modules = model.layer_list
-    elif isinstance(model, nn.Sequential):
-        modules = list(model)
-    else:
-        modules = list(model.children())
+    iris = sklearn_datasets.load_iris()
+    X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(iris.data, iris.target)
+    # Train and save a single model
+    # model, _ = train_and_save_model(X_train, X_test, num_features, y_train, y_test, num_labels, loss_metric=metric)
 
-    i = 0
-    while i < len(modules):
-        mod = modules[i]
-        i += 1
-        if isinstance(mod, TorchConnector):
-            params = {}
-            for name, param in mod.named_parameters():
-                params[name] = param.detach().cpu().numpy()
-            qc = mod.neural_network.circuit
-            trained_values = params["weight"]
-            input_values = [0.0] * len(model.input_params)
+    # Train and compare three models with different loss metrics
+    # train_and_compare_models(X_train, X_test, y_train, y_test, num_features, num_labels)
 
-            # Create a dictionary mapping each parameter to its value.
-            param_dict = {p: v for p, v in zip(model.input_params, input_values)}
-            param_dict.update(
-                {p: v for p, v in zip(model.weight_params, trained_values)}
-            )
-            bound_circuit = qc.assign_parameters(param_dict)
-            unitary_matrix = Operator(bound_circuit).data
-            # print(unitary_matrix)
-            print(
-                mod,
-                "\n",
-                type(mod),
-                "\n",
-                mod.named_parameters(),
-                "\n",
-                unitary_matrix,
-                "\n-----------",
-            )
-            print(params)
+    # Train with different regularization parameters
+    train_with_regularization(X_train, X_test, y_train, y_test, num_features, num_labels)
