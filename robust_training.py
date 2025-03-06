@@ -93,9 +93,11 @@ class HybridQuantumModel(nn.Module):
 
 
 class RobustQuantumTrainer:
-    def __init__(self, model, learning_rate=0.01, lambda_reg=0.1, loss_metric="l2"):
+    def __init__(self, model, X_test, y_test, learning_rate=0.01, lambda_reg=0.1, loss_metric="l2"):
         self.model = model
         self.lambda_reg = lambda_reg
+        self.X_test = X_test
+        self.y_test = y_test
         self.optimizer = optim.Adam(
             model.parameters(), lr=learning_rate, weight_decay=lambda_reg, amsgrad=True
         )
@@ -121,6 +123,8 @@ class RobustQuantumTrainer:
         )
 
         lipschitz_values = []
+        test_accuracies = []  # Track test accuracy over epochs
+
         for epoch in range(epochs):
             for batch_idx, (data, target) in enumerate(train_loader):
                 data, target = data.to(device), target.to(device)
@@ -141,17 +145,31 @@ class RobustQuantumTrainer:
                 loss.backward()
                 self.optimizer.step()
 
-
-            from QlipSDP import HybridModelExtractor, compute_network_lipschitz
             # Compute Lipschitz constant for the current model state
+            from QlipSDP import HybridModelExtractor, compute_network_lipschitz
             extractor = HybridModelExtractor(self.model)
             extracted_layers = extractor.extract()
             overall_K = compute_network_lipschitz(extracted_layers)
             lipschitz_values.append(overall_K)
 
-            print(f"Epoch {epoch + 1}/{epochs}, Loss: {loss.item()}")
+            # Evaluate test accuracy at the end of each epoch
+            accuracy = self.evaluate_test_accuracy()
+            test_accuracies.append(accuracy)
+            
+            print(f"Epoch {epoch + 1}/{epochs}, Loss: {loss.item()}, Test Accuracy: {accuracy:.2f}%")
 
-        return lipschitz_values
+        return lipschitz_values, test_accuracies
+
+    def evaluate_test_accuracy(self):
+        X_test_tensor = torch.tensor(self.X_test, dtype=torch.float32).to(device)
+        y_test_tensor = torch.tensor(self.y_test, dtype=torch.long).to(device)
+
+        with torch.no_grad():
+            output = self.model(X_test_tensor)
+            _, predicted = torch.max(output, 1)
+            _, y_label = torch.max(y_test_tensor, 1)
+            accuracy = (predicted == y_label).float().mean().item()
+        return accuracy
 
 def prepare_data(X, y):
     num_classes = max(y) - min(y) + 1
@@ -205,19 +223,46 @@ def train_and_save_model(
 
     # Train and evaluate the model
     trainer = RobustQuantumTrainer(
-        model, learning_rate=learning_rate, lambda_reg=lambda_reg, loss_metric=loss_metric
+        model, X_test, y_test, learning_rate=learning_rate, lambda_reg=lambda_reg, loss_metric=loss_metric
     )  # lambda_reg := lipsdp
 
-    lipschitz_values = trainer.train(X_train, y_train, epochs=epochs, batch_size=batch_size)
+    lipschitz_values, accuracies  = trainer.train(X_train, y_train, epochs=epochs, batch_size=batch_size)
     
     print("Learning Rate:", learning_rate, ",\t Regularization Constant:", lambda_reg)
     print("#Epochs:", epochs, ",\t |Batch|:", batch_size)
 
     torch.save(model.state_dict(), save_path)
     evaluate(model, X_test, y_test)
-    return lipschitz_values
+    return lipschitz_values, accuracies
 
+def train_naive(X_train, X_test, y_train, y_test, num_features, num_labels, num_qubits=4, width=4, learning_rate=0.01, epochs=30, batch_size=16):
+    # Train without regularization or noise
+    model = HybridQuantumModel(
+        num_qubits=num_qubits,
+        num_features=num_features,
+        num_labels=num_labels,
+        width=width
+    ).to(device)
+    trainer = RobustQuantumTrainer(model, X_test, y_test, learning_rate=learning_rate, lambda_reg=0.0)  # No regularization
+    lipschitz_values, accuracies = trainer.train(X_train, y_train, epochs=epochs, batch_size=batch_size) 
+    return lipschitz_values, accuracies
 
+def train_pdg(X_train, X_test, y_train, y_test, num_features, num_labels, num_qubits=4, width=4, learning_rate=0.01, epochs=30, batch_size=16, noise_level=0.1):
+    # Add noise to the data to increase dataset size (data augmentation)
+    X_train_noisy = X_train + noise_level * np.random.randn(*X_train.shape)
+    X_train_augmented = np.vstack([X_train, X_train_noisy])
+    y_train_augmented = np.vstack([y_train, y_train])
+
+    # Train with augmented data
+    model = HybridQuantumModel(
+        num_qubits=num_qubits,
+        num_features=num_features,
+        num_labels=num_labels,
+        width=width
+    ).to(device)
+    trainer = RobustQuantumTrainer(model, X_test, y_test, learning_rate=learning_rate, lambda_reg=0.0)  # No regularization
+    lipschitz_values, accuracies = trainer.train(X_train_augmented, y_train_augmented, epochs=epochs, batch_size=batch_size)
+    return lipschitz_values, accuracies
 
 def train_and_compare_models(X_train, X_test, y_train, y_test, num_features, num_labels):
     metrics = ["l1", "l2", "linf"]
@@ -279,6 +324,19 @@ def train_with_varying_width(X_train, X_test, y_train, y_test, num_features, num
         lipschitz_values["l1"], lipschitz_values["l2"], lipschitz_values["linf"], widths
     )
 
+# Train and compare the models with the desired functionality
+def train_and_plot_comparison(X_train, X_test, y_train, y_test, num_features, num_labels):
+    print("Training naive model...")
+    lipschitz_naive, accuracy_naive = train_naive(X_train, X_test, y_train, y_test, num_features, num_labels)
+    print("Training model with regularization...")
+    lipschitz_reg, accuracy_reg = train_and_save_model(X_train, X_test, num_features, y_train, y_test, num_labels)
+    print("Training model with PDG...")
+    lipschitz_pdg, accuracy_pdg = train_pdg(X_train, X_test, y_train, y_test, num_features, num_labels)
+
+    # Plotting Lipschitz constant vs. epochs
+    plot_lipschitz_accuracy_vs_epochs(lipschitz_naive, lipschitz_reg, lipschitz_pdg, accuracy_naive, accuracy_reg, accuracy_pdg)
+
+
 # Plotting function
 def plot_lipschitz_values(lipschitz_values_l1, lipschitz_values_l2, lipschitz_values_linf, num_epochs):
     epochs = range(1, num_epochs + 1)
@@ -335,6 +393,35 @@ def plot_lipschitz_vs_width(lipschitz_values_l1, lipschitz_values_l2, lipschitz_
     plt.grid(True)
     plt.show()
 
+def plot_lipschitz_accuracy_vs_epochs(lipschitz_naive, lipschitz_reg, lipschitz_pdg, accuracy_naive, accuracy_reg, accuracy_pdg):
+    epochs = range(1, len(lipschitz_naive) + 1)
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(10, 12))
+    
+    # Top plot: Lipschitz Constant vs Epochs
+    ax1.plot(epochs, lipschitz_naive, label="Naive", marker="o")
+    ax1.plot(epochs, lipschitz_reg, label="Regularization", marker="x")
+    ax1.plot(epochs, lipschitz_pdg, label="PDG", marker="s")
+    ax1.set_ylabel("Lipschitz Constant")
+    ax1.set_title("Lipschitz Constant vs Epochs")
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Bottom plot: Test Accuracy vs Epochs
+    ax2.plot(epochs, accuracy_naive, label="Naive", marker="o")
+    ax2.plot(epochs, accuracy_reg, label="Regularization", marker="x")
+    ax2.plot(epochs, accuracy_pdg, label="PDG", marker="s")
+    ax2.set_xlabel("Epochs")
+    ax2.set_ylabel("Test Accuracy")
+    ax2.set_title("Test Accuracy vs Epochs")
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+
+
+    
 if __name__ == "__main__":
     iris = sklearn_datasets.load_iris()
     X_train, X_test, num_features, y_train, y_test, num_labels = prepare_data(iris.data, iris.target)
@@ -347,8 +434,11 @@ if __name__ == "__main__":
     # Train with different regularization parameters
     # train_with_regularization(X_train, X_test, y_train, y_test, num_features, num_labels)
 
-    # Train and plot Lipschitz vs. Number of Qubits for different loss metrics
+    # Train and plot Lipschitz vs. Number of Qubitss for different loss metrics
     # train_with_varying_qubits(X_train, X_test, y_train, y_test, num_features, num_labels)
 
     # Train and plot Lipschitz vs. Width of Classical Encoding Network for different loss metrics
-    train_with_varying_width(X_train, X_test, y_train, y_test, num_features, num_labels)
+    # train_with_varying_width(X_train, X_test, y_train, y_test, num_features, num_labels)
+
+    # Train and compare naive, regularized, and PDG models
+    train_and_plot_comparison(X_train, X_test, y_train, y_test, num_features, num_labels)
